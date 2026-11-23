@@ -20,10 +20,16 @@ Long entries (spot, long only) require bullish structure, plus one of
 Filters: pair closes above its 50-day EMA, and BTC closes above its 200-day EMA
 (market regime - no new longs in a BTC downtrend).
 
-Risk management:
-    * Stop-loss sits just below the zone that justified the entry (OB / FVG bottom or sweep wick).
+Short entries (futures only - see config_smc_futures.json) mirror the order-block long:
+    ob_retest_short : in bearish structure, price trades back up into an unmitigated bearish
+                      order block (the last bullish candle before the impulse that broke a
+                      swing low). Pair below its 50-day EMA, BTC below its 200-day EMA.
+FVG / sweep entries are long-only.
+
+Risk management (both sides):
+    * Stop-loss sits just beyond the zone that justified the entry (OB / FVG edge or sweep wick).
     * Take-profit at `rr` x the initial risk.
-    * Exit signal on a bearish CHoCH (structure flips down).
+    * Exit signal on a CHoCH against the position (structure flips).
 """
 
 from datetime import datetime
@@ -48,7 +54,7 @@ class SMCDaily(IStrategy):
     INTERFACE_VERSION = 3
 
     timeframe = "1d"
-    can_short = False
+    can_short = False  # turned on in __init__ when running in futures mode
 
     # Exits are driven by structure / RR targets, so ROI is effectively disabled.
     minimal_roi = {"0": 100}
@@ -66,7 +72,8 @@ class SMCDaily(IStrategy):
     swing_length = 3  # candles on each side to confirm a swing point
     ob_lookback = 10  # how far back from a break to search for the order block candle
     ema_period = 50
-    # Market regime filter: no new longs while BTC closes below its 200-DAY EMA.
+    # Market regime filter: longs only while BTC closes above its 200-DAY EMA, shorts only
+    # while it closes below.
     # Structure settings above are in candles of the chart timeframe; this one is in days, and
     # is converted to candles in __init__ so the filter means the same thing on any timeframe
     # (e.g. --timeframe 4h -> 1200-candle EMA).
@@ -77,6 +84,10 @@ class SMCDaily(IStrategy):
 
     def __init__(self, config: dict) -> None:
         super().__init__(config)
+        # Same file runs long-only on spot and long + short on futures.
+        if config.get("trading_mode", "spot") == "futures":
+            self.can_short = True
+            self.btc_pair = f"{self.btc_pair}:{self.btc_pair.split('/')[1]}"  # BTC/USDT:USDT
         tf_minutes = timeframe_to_minutes(config.get("timeframe", self.timeframe))
         self.btc_ema_period = max(2, round(self.btc_ema_days * 1440 / tf_minutes))
         self.startup_candle_count = max(self.ema_period, self.btc_ema_period) + 10
@@ -122,16 +133,20 @@ class SMCDaily(IStrategy):
             name: np.full(n, np.nan)
             for name in ("swing_high", "swing_low", "ob_top", "ob_bot", "fvg_top", "fvg_bot")
         }
-        for name in ("trend", "bos_up", "choch_up", "choch_down", "ob_touch", "fvg_touch",
-                     "sweep"):
+        out["bear_ob_top"] = np.full(n, np.nan)
+        out["bear_ob_bot"] = np.full(n, np.nan)
+        for name in ("trend", "bos_up", "bos_down", "choch_up", "choch_down", "ob_touch",
+                     "fvg_touch", "sweep", "ob_touch_short"):
             out[name] = np.zeros(n)
         out["entry_sl"] = np.full(n, np.nan)
+        out["entry_sl_short"] = np.full(n, np.nan)
 
         trend = 0
         sh = sl = np.nan
         sh_broken = sl_broken = sl_swept = False
         ob = None  # [top, bottom, created_idx, used]
         fvg = None
+        bear_ob = None  # same layout, bearish order block
 
         for i in range(n):
             # 1. new confirmed swing points
@@ -148,6 +163,7 @@ class SMCDaily(IStrategy):
                 else:
                     out["choch_up"][i] = 1
                 trend = 1
+                bear_ob = None  # bearish zone no longer valid
                 # order block = last bearish candle before the break
                 for j in range(i - 1, max(i - 1 - self.ob_lookback, -1), -1):
                     if c[j] < o[j]:
@@ -155,16 +171,25 @@ class SMCDaily(IStrategy):
                         break
             if not np.isnan(sl) and not sl_broken and c[i] < sl:
                 sl_broken = True
-                if trend == 1:
+                if trend == -1:
+                    out["bos_down"][i] = 1
+                else:
                     out["choch_down"][i] = 1
                 trend = -1
                 ob = fvg = None  # bullish zones no longer valid
+                # bearish order block = last bullish candle before the break
+                for j in range(i - 1, max(i - 1 - self.ob_lookback, -1), -1):
+                    if c[j] > o[j]:
+                        bear_ob = [h[j], lo[j], i, False]
+                        break
 
-            # 3. zone invalidation (closed through the bottom)
+            # 3. zone invalidation (closed through the far side)
             if ob is not None and c[i] < ob[1]:
                 ob = None
             if fvg is not None and c[i] < fvg[1]:
                 fvg = None
+            if bear_ob is not None and c[i] > bear_ob[0]:
+                bear_ob = None
 
             # 4. entry triggers (only in bullish structure)
             if trend == 1:
@@ -182,6 +207,12 @@ class SMCDaily(IStrategy):
                     out["sweep"][i] = 1
                     sl_swept = True
                     out["entry_sl"][i] = lo[i]  # wick low is the invalidation
+            elif trend == -1:
+                if (bear_ob is not None and not bear_ob[3] and i > bear_ob[2]
+                        and h[i] >= bear_ob[1] and c[i] < bear_ob[0]):
+                    out["ob_touch_short"][i] = 1
+                    bear_ob[3] = True
+                    out["entry_sl_short"][i] = bear_ob[0]
 
             # 5. new bullish FVG (newest one replaces the old)
             if i >= 2 and lo[i] > h[i - 2] and trend == 1:
@@ -194,6 +225,8 @@ class SMCDaily(IStrategy):
                 out["ob_top"][i], out["ob_bot"][i] = ob[0], ob[1]
             if fvg is not None:
                 out["fvg_top"][i], out["fvg_bot"][i] = fvg[0], fvg[1]
+            if bear_ob is not None:
+                out["bear_ob_top"][i], out["bear_ob_bot"][i] = bear_ob[0], bear_ob[1]
 
         return pd.concat([df, pd.DataFrame(out, index=df.index)], axis=1)
 
@@ -237,10 +270,25 @@ class SMCDaily(IStrategy):
             if flag:
                 cond = base & (dataframe[col] == 1)
                 dataframe.loc[cond, ["enter_long", "enter_tag"]] = (1, tag)
+
+        if self.can_short and self.use_ob.value:
+            short = (
+                (dataframe["trend"] == -1)
+                & (dataframe["volume"] > 0)
+                & (dataframe["ob_touch_short"] == 1)
+                & ((dataframe["entry_sl_short"] - dataframe["close"]) / dataframe["close"]
+                   <= self.max_risk.value)
+            )
+            if self.use_ema_filter.value:
+                short &= dataframe["close"] < dataframe["ema"]
+            if self.use_btc_filter.value:
+                short &= dataframe["bull_btc"] == 0
+            dataframe.loc[short, ["enter_short", "enter_tag"]] = (1, "ob_retest_short")
         return dataframe
 
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         dataframe.loc[dataframe["choch_down"] == 1, ["exit_long", "exit_tag"]] = (1, "choch_down")
+        dataframe.loc[dataframe["choch_up"] == 1, ["exit_short", "exit_tag"]] = (1, "choch_up")
         return dataframe
 
     # ------------------------------------------------------------------ risk
@@ -248,9 +296,11 @@ class SMCDaily(IStrategy):
         """Structural stop price, read from the signal candle that opened the trade."""
         df, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
         signal = df.loc[df["date"] < trade.open_date_utc]
-        if signal.empty or np.isnan(signal["entry_sl"].iat[-1]):
+        col = "entry_sl_short" if trade.is_short else "entry_sl"
+        if signal.empty or np.isnan(signal[col].iat[-1]):
             return None
-        return signal["entry_sl"].iat[-1] * (1 - self.sl_buffer.value)
+        side = 1 if trade.is_short else -1  # buffer goes beyond the zone, away from price
+        return signal[col].iat[-1] * (1 + side * self.sl_buffer.value)
 
     def custom_stoploss(self, pair: str, trade: Trade, current_time: datetime,
                         current_rate: float, current_profit: float, after_fill: bool,
@@ -264,9 +314,13 @@ class SMCDaily(IStrategy):
     def custom_exit(self, pair: str, trade: Trade, current_time: datetime,
                     current_rate: float, current_profit: float, **kwargs) -> str | None:
         stop = self._entry_stop(pair, trade)
-        if stop is None or stop >= trade.open_rate:
+        if stop is None:
             return None
-        target = trade.open_rate + self.rr.value * (trade.open_rate - stop)
-        if current_rate >= target:
-            return "take_profit_rr"
-        return None
+        risk = (stop - trade.open_rate) if trade.is_short else (trade.open_rate - stop)
+        if risk <= 0:
+            return None
+        if trade.is_short:
+            hit = current_rate <= trade.open_rate - self.rr.value * risk
+        else:
+            hit = current_rate >= trade.open_rate + self.rr.value * risk
+        return "take_profit_rr" if hit else None
