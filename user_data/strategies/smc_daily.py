@@ -30,6 +30,10 @@ Risk management (both sides):
     * Stop-loss sits just beyond the zone that justified the entry (OB / FVG edge or sweep wick).
     * Take-profit at `rr` x the initial risk.
     * Exit signal on a CHoCH against the position (structure flips).
+    * Circuit breaker (freqtrade StoplossGuard): after 2 stop-outs within 20 days, no new
+      entries on any pair for 10 days. Chosen from ~40 drawdown experiments
+      (user_data/strategies/smc_variants.py); it cut max drawdown on every pair set tested.
+      Backtests only apply it with --enable-protections; dry-run / live always apply it.
 """
 
 from datetime import datetime
@@ -104,6 +108,18 @@ class SMCDaily(IStrategy):
     sl_buffer = DecimalParameter(0.0, 0.03, default=0.01, decimals=3, space="sell")
     rr = DecimalParameter(1.0, 5.0, default=2.5, decimals=1, space="sell")
 
+    @property
+    def protections(self):
+        return [
+            {
+                "method": "StoplossGuard",
+                "lookback_period_candles": 20,
+                "trade_limit": 2,
+                "stop_duration_candles": 10,
+                "only_per_pair": False,
+            }
+        ]
+
     plot_config = {
         "main_plot": {
             "swing_high": {"color": "red"},
@@ -140,6 +156,9 @@ class SMCDaily(IStrategy):
             out[name] = np.zeros(n)
         out["entry_sl"] = np.full(n, np.nan)
         out["entry_sl_short"] = np.full(n, np.nan)
+        # index of the candle whose break created the order block being retested (diagnostic)
+        out["ob_src"] = np.full(n, np.nan)
+        out["ob_src_short"] = np.full(n, np.nan)
 
         trend = 0
         sh = sl = np.nan
@@ -197,6 +216,7 @@ class SMCDaily(IStrategy):
                     out["ob_touch"][i] = 1
                     ob[3] = True
                     out["entry_sl"][i] = ob[1]
+                    out["ob_src"][i] = ob[2]
                 if (fvg is not None and not fvg[3] and i > fvg[2] and lo[i] <= fvg[0]
                         and c[i] >= fvg[1]):
                     out["fvg_touch"][i] = 1
@@ -213,6 +233,7 @@ class SMCDaily(IStrategy):
                     out["ob_touch_short"][i] = 1
                     bear_ob[3] = True
                     out["entry_sl_short"][i] = bear_ob[0]
+                    out["ob_src_short"][i] = bear_ob[2]
 
             # 5. new bullish FVG (newest one replaces the old)
             if i >= 2 and lo[i] > h[i - 2] and trend == 1:
