@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "backtest-dashboard",
+      "runtimeExecutable": ".venv/bin/python",
+      "runtimeArgs": ["user_data/dashboard/app.py", "--port", "8050"],
+      "port": 8050
+    }
+  ]
+}
