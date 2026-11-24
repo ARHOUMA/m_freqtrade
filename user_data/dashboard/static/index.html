@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Backtest Dashboard</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 17l5-6 4 4 8-9" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span>Backtest Dashboard</span>
+    </div>
+    <div class="pickers">
+      <label>Run
+        <select id="run-select"></select>
+      </label>
+      <label>Strategy
+        <select id="strategy-select"></select>
+      </label>
+      <button id="theme-toggle" class="icon-btn" title="Toggle light / dark" aria-label="Toggle theme">◐</button>
+    </div>
+  </header>
+
+  <div class="subbar">
+    <div id="meta" class="meta"></div>
+    <nav class="tabs" role="tablist">
+      <button data-tab="overview" class="active">Overview</button>
+      <button data-tab="compare">Compare</button>
+      <button data-tab="trades">Trades</button>
+    </nav>
+  </div>
+
+  <main>
+    <div id="error" class="error" hidden></div>
+
+    <!-- OVERVIEW -->
+    <section id="tab-overview" class="tab">
+      <div id="kpis" class="kpis"></div>
+
+      <div class="card">
+        <div class="card-head"><h2>Equity</h2><span class="hint">balance after each closed trade</span></div>
+        <div class="chart tall"><canvas id="equity-chart"></canvas></div>
+        <div class="card-head sub"><h3>Drawdown</h3><span class="hint">distance below the previous peak</span></div>
+        <div class="chart short"><canvas id="dd-chart"></canvas></div>
+      </div>
+
+      <div class="grid2">
+        <div class="card">
+          <div class="card-head"><h2>Yearly return</h2><span class="hint">% of balance at the start of each year</span></div>
+          <div class="chart"><canvas id="yearly-chart"></canvas></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>Long vs short</h2></div>
+          <div id="sides" class="sides"></div>
+          <div class="card-head sub"><h3>Entry tags</h3></div>
+          <div class="table-wrap"><table id="tags-table" class="tbl"></table></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>Monthly returns</h2><span class="hint">% of balance at the start of each month</span></div>
+        <div class="table-wrap"><table id="monthly-table" class="heat"></table></div>
+      </div>
+
+      <div class="grid2">
+        <div class="card">
+          <div class="card-head"><h2>Profit by pair</h2></div>
+          <div class="chart auto" id="pairs-box"><canvas id="pairs-chart"></canvas></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>Exit reasons</h2></div>
+          <div class="chart"><canvas id="exits-chart"></canvas></div>
+          <div class="table-wrap"><table id="exits-table" class="tbl"></table></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- COMPARE -->
+    <section id="tab-compare" class="tab" hidden>
+      <div class="card">
+        <div class="card-head"><h2>Return vs drawdown</h2><span class="hint">up and to the left is better · click a point to open it</span></div>
+        <div class="chart tall"><canvas id="scatter-chart"></canvas></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h2>All strategies in this run</h2><span class="hint">click a header to sort · click a row to open it</span></div>
+        <div class="table-wrap"><table id="compare-table" class="tbl sortable"></table></div>
+      </div>
+    </section>
+
+    <!-- TRADES -->
+    <section id="tab-trades" class="tab" hidden>
+      <div class="card">
+        <div class="card-head">
+          <h2>Price &amp; trades</h2>
+          <label class="inline">Pair <select id="pair-select"></select></label>
+        </div>
+        <div class="legend">
+          <span><i class="mk long"></i>long entry</span>
+          <span><i class="mk short"></i>short entry</span>
+          <span><i class="mk win"></i>winning exit</span>
+          <span><i class="mk loss"></i>losing exit</span>
+          <span id="candle-step" class="hint"></span>
+        </div>
+        <div class="chart tall"><canvas id="price-chart"></canvas></div>
+      </div>
+      <div class="card">
+        <div class="card-head">
+          <h2>Trades</h2>
+          <div class="filters">
+            <label class="inline">Side
+              <select id="side-filter"><option value="">all</option><option>long</option><option>short</option></select>
+            </label>
+            <label class="inline">Result
+              <select id="result-filter"><option value="">all</option><option value="win">winners</option><option value="loss">losers</option></select>
+            </label>
+            <label class="inline"><input type="checkbox" id="pair-only" checked> selected pair only</label>
+          </div>
+        </div>
+        <div class="table-wrap"><table id="trades-table" class="tbl sortable"></table></div>
+        <button id="more-trades" class="more" hidden>Show more</button>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
