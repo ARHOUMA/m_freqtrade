@@ -98,6 +98,12 @@ class SMCCombo(SMCDaily):
                 cond &= (c > df["ema"]) if sign == 1 else (c <= df["ema"])
             if self.use_btc_filter.value:
                 cond &= df["bull_btc"] == (1 if sign == 1 else 0)
+            if self.use_fng_filter.value:  # NaN never blocks
+                fng = df["fng"]
+                if sign == 1:
+                    cond &= ~((fng > self.fng_long_max.value) | (fng < self.fng_long_min.value))
+                else:
+                    cond &= ~((fng < self.fng_short_min.value) | (fng > self.fng_short_max.value))
             tag = self.ifvg_tag if sign == 1 else f"{self.ifvg_tag}_short"
             df.loc[cond, [f"enter_{side}", "enter_tag"]] = (1, tag)
         # SMCDaily's order-block entries are written last, so they win on a shared candle
@@ -145,8 +151,7 @@ class SMCCombo(SMCDaily):
             return super()._entry_stop(pair, trade)
         key = (pair, trade.open_date_utc, trade.is_short)
         if key not in self._stop_cache:
-            df, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
-            signal = df.loc[df["date"] < trade.open_date_utc]
+            signal = self._signal_candle(pair, trade)
             col = "ifvg_short_sl" if trade.is_short else "ifvg_long_sl"
             if signal.empty or np.isnan(signal[col].iat[-1]):
                 return None

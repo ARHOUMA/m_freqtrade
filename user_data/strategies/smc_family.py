@@ -62,6 +62,7 @@ from freqtrade.strategy import (
     IStrategy,
     merge_informative_pair,
     stoploss_from_absolute,
+    timeframe_to_prev_date,
 )
 
 
@@ -218,7 +219,9 @@ class SMCFamily(IStrategy):
         if key in self._levels_cache:
             return self._levels_cache[key]
         df, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
-        signal = df.loc[df["date"] < trade.open_date_utc]
+        # live entries happen just after the candle opens: compare with the candle start
+        entry_candle = timeframe_to_prev_date(self.timeframe, trade.open_date_utc)
+        signal = df.loc[df["date"] < entry_candle]
         if signal.empty:
             return None
         side = "short" if trade.is_short else "long"

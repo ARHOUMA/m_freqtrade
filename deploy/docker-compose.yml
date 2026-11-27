@@ -1,0 +1,59 @@
+# Two paper-trading (dry-run) bots running SMCCombo_ModelGuard on Binance daily candles.
+# Dry-run: no API keys, no real money - orders are simulated against live prices.
+#
+#   smc-spot     spot market, longs only          web UI / API on 127.0.0.1:8080
+#   smc-futures  USDT futures, longs and shorts   web UI / API on 127.0.0.1:8081
+#
+# Secrets (web UI password, optional Telegram tokens) live in deploy/.env - see .env.example.
+# Start: docker compose up -d     Logs: docker compose logs -f     Stop: docker compose down
+
+x-bot: &bot
+  image: freqtradeorg/freqtrade:stable
+  restart: unless-stopped
+  env_file: .env
+  volumes:
+    - "../user_data:/freqtrade/user_data"
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  smc-spot:
+    <<: *bot
+    container_name: smc-spot
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      FREQTRADE__BOT_NAME: smc-spot
+      FREQTRADE__TELEGRAM__ENABLED: ${SPOT_TELEGRAM_ENABLED:-false}
+      FREQTRADE__TELEGRAM__TOKEN: ${SPOT_TELEGRAM_TOKEN:-}
+      FREQTRADE__TELEGRAM__CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+    command: >
+      trade
+      --dry-run
+      --config /freqtrade/user_data/config_smc.json
+      --config /freqtrade/user_data/config_dryrun.json
+      --strategy SMCCombo_ModelGuard
+      --db-url sqlite:////freqtrade/user_data/dryrun_smc_spot.sqlite
+      --logfile /freqtrade/user_data/logs/smc_spot.log
+
+  smc-futures:
+    <<: *bot
+    container_name: smc-futures
+    ports:
+      - "127.0.0.1:8081:8080"
+    environment:
+      FREQTRADE__BOT_NAME: smc-futures
+      FREQTRADE__TELEGRAM__ENABLED: ${FUTURES_TELEGRAM_ENABLED:-false}
+      FREQTRADE__TELEGRAM__TOKEN: ${FUTURES_TELEGRAM_TOKEN:-}
+      FREQTRADE__TELEGRAM__CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+    command: >
+      trade
+      --dry-run
+      --config /freqtrade/user_data/config_smc_futures.json
+      --config /freqtrade/user_data/config_dryrun.json
+      --strategy SMCCombo_ModelGuard
+      --db-url sqlite:////freqtrade/user_data/dryrun_smc_futures.sqlite
+      --logfile /freqtrade/user_data/logs/smc_futures.log

@@ -34,9 +34,18 @@ Risk management (both sides):
       entries on any pair for 10 days. Chosen from ~40 drawdown experiments
       (user_data/strategies/smc_variants.py); it cut max drawdown on every pair set tested.
       Backtests only apply it with --enable-protections; dry-run / live always apply it.
+
+Optional sentiment filter (use_fng_filter, off by default): the Crypto Fear & Greed Index
+(see fear_greed.py). Longs only while fng_long_min <= index <= fng_long_max, shorts only
+while fng_short_min <= index <= fng_short_max. The defaults (80 / 20 caps, 0 / 100 floors)
+block longs in euphoria and shorts in capitulation; raising the long floor / lowering the
+short cap instead uses sentiment as trend confirmation. Days without index data never block.
 """
 
+import logging
+import sys
 from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -47,12 +56,21 @@ from freqtrade.persistence import Trade
 from freqtrade.strategy import (
     BooleanParameter,
     DecimalParameter,
+    IntParameter,
     IStrategy,
     merge_informative_pair,
     stoploss_from_absolute,
     timeframe_to_minutes,
+    timeframe_to_prev_date,
 )
+from freqtrade.enums import RunMode
 
+
+sys.path.insert(0, str(Path(__file__).parent))
+import fear_greed  # noqa: E402
+
+
+logger = logging.getLogger(__name__)
 
 class SMCDaily(IStrategy):
     INTERFACE_VERSION = 3
@@ -62,8 +80,15 @@ class SMCDaily(IStrategy):
 
     # Exits are driven by structure / RR targets, so ROI is effectively disabled.
     minimal_roi = {"0": 100}
-    # Hard cap. The real stop is the structural one set in custom_stoploss.
+    # Hard cap: a 25% price move against the trade (scaled by leverage in __init__, because
+    # freqtrade measures stoploss on the margin). The real stop is the structural one set in
+    # custom_stoploss.
     stoploss = -0.25
+    # Leverage for futures trades (spot is always 1x). Structural stops and RR targets are set
+    # in price, so leverage changes position size and P&L, not where trades exit. Kept at 1x:
+    # 2x / 3x backtests (smc_leverage_lab.py) more than doubled max drawdown (to 50-85%) and
+    # lowered CAGR / drawdown on every futures pair set.
+    futures_leverage = 1.0
     use_custom_stoploss = True
     trailing_stop = False
 
@@ -92,6 +117,7 @@ class SMCDaily(IStrategy):
         if config.get("trading_mode", "spot") == "futures":
             self.can_short = True
             self.btc_pair = f"{self.btc_pair}:{self.btc_pair.split('/')[1]}"  # BTC/USDT:USDT
+            self.stoploss = max(-0.99, self.stoploss * self.futures_leverage)
         tf_minutes = timeframe_to_minutes(config.get("timeframe", self.timeframe))
         self.btc_ema_period = max(2, round(self.btc_ema_days * 1440 / tf_minutes))
         self.startup_candle_count = max(self.ema_period, self.btc_ema_period) + 10
@@ -104,6 +130,12 @@ class SMCDaily(IStrategy):
     use_ema_filter = BooleanParameter(default=True, space="buy")
     use_btc_filter = BooleanParameter(default=True, space="buy")
     max_risk = DecimalParameter(0.04, 0.20, default=0.12, decimals=2, space="buy")
+    # Fear & Greed sentiment filter (0 = extreme fear, 100 = extreme greed)
+    use_fng_filter = BooleanParameter(default=False, space="buy")
+    fng_long_max = IntParameter(50, 100, default=80, space="buy")
+    fng_short_min = IntParameter(0, 50, default=20, space="buy")
+    fng_long_min = IntParameter(0, 80, default=0, space="buy")
+    fng_short_max = IntParameter(30, 100, default=100, space="buy")
 
     sl_buffer = DecimalParameter(0.0, 0.03, default=0.01, decimals=3, space="sell")
     rr = DecimalParameter(1.0, 5.0, default=2.5, decimals=1, space="sell")
@@ -265,7 +297,22 @@ class SMCDaily(IStrategy):
             dataframe, btc[["date", "bull"]], self.timeframe, self.timeframe, ffill=True,
             append_timeframe=False, suffix="btc",
         )
+        dataframe["fng"] = self._fear_greed(dataframe["date"])
         return dataframe
+
+    def _fear_greed(self, dates):
+        """Fear & Greed value per candle (NaN where unknown). The history is loaded once per
+        candle in dry-run / live (refreshed from the API when stale) and once per backtest."""
+        live = self.dp.runmode in (RunMode.DRY_RUN, RunMode.LIVE)
+        latest = dates.iat[-1] if len(dates) else None
+        cached = getattr(self, "_fng_cache", None)
+        if cached is None or (live and cached[0] != latest):
+            try:
+                self._fng_cache = (latest, fear_greed.load(refresh=live))
+            except Exception as e:
+                logger.warning("Fear & Greed data unavailable, filter disabled: %s", e)
+                return np.nan
+        return fear_greed.fng_for_candles(dates, self._fng_cache[1])
 
     # ------------------------------------------------------------------ signals
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
@@ -281,6 +328,9 @@ class SMCDaily(IStrategy):
             base &= dataframe["close"] > dataframe["ema"]
         if self.use_btc_filter.value:
             base &= dataframe["bull_btc"] == 1
+        if self.use_fng_filter.value:
+            base &= ~(dataframe["fng"] > self.fng_long_max.value)  # NaN never blocks
+            base &= ~(dataframe["fng"] < self.fng_long_min.value)
 
         # later assignments win, so order = lowest -> highest priority tag
         for flag, col, tag in (
@@ -304,6 +354,9 @@ class SMCDaily(IStrategy):
                 short &= dataframe["close"] < dataframe["ema"]
             if self.use_btc_filter.value:
                 short &= dataframe["bull_btc"] == 0
+            if self.use_fng_filter.value:
+                short &= ~(dataframe["fng"] < self.fng_short_min.value)
+                short &= ~(dataframe["fng"] > self.fng_short_max.value)
             dataframe.loc[short, ["enter_short", "enter_tag"]] = (1, "ob_retest_short")
         return dataframe
 
@@ -313,10 +366,23 @@ class SMCDaily(IStrategy):
         return dataframe
 
     # ------------------------------------------------------------------ risk
+    def leverage(self, pair: str, current_time: datetime, current_rate: float,
+                 proposed_leverage: float, max_leverage: float, entry_tag: str | None,
+                 side: str, **kwargs) -> float:
+        return min(self.futures_leverage, max_leverage)
+
+    def _signal_candle(self, pair: str, trade: Trade) -> DataFrame:
+        """Candles up to the signal candle (the last one closed before the entry candle).
+        Live entries happen a few seconds after the candle opens, so compare with the start
+        of the entry candle, not the exact open time - otherwise the entry candle itself
+        becomes the 'signal' once it has closed."""
+        df, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+        entry_candle = timeframe_to_prev_date(self.timeframe, trade.open_date_utc)
+        return df.loc[df["date"] < entry_candle]
+
     def _entry_stop(self, pair: str, trade: Trade) -> float | None:
         """Structural stop price, read from the signal candle that opened the trade."""
-        df, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
-        signal = df.loc[df["date"] < trade.open_date_utc]
+        signal = self._signal_candle(pair, trade)
         col = "entry_sl_short" if trade.is_short else "entry_sl"
         if signal.empty or np.isnan(signal[col].iat[-1]):
             return None
@@ -340,8 +406,15 @@ class SMCDaily(IStrategy):
         risk = (stop - trade.open_rate) if trade.is_short else (trade.open_rate - stop)
         if risk <= 0:
             return None
+        # Check the target once per candle, on the last closed candle's close (= the open of
+        # the current candle), exactly as backtesting does. Live, current_rate moves all day and
+        # would exit intraday at the target, which backtested worse (SMC00_OB_Plus).
+        df, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+        if df.empty:
+            return None
+        price = df["close"].iat[-1]
         if trade.is_short:
-            hit = current_rate <= trade.open_rate - self.rr.value * risk
+            hit = price <= trade.open_rate - self.rr.value * risk
         else:
-            hit = current_rate >= trade.open_rate + self.rr.value * risk
+            hit = price >= trade.open_rate + self.rr.value * risk
         return "take_profit_rr" if hit else None
